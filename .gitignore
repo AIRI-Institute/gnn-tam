@@ -1,0 +1,5 @@
+environment/
+data/
+saved_models/
+__pycache__/
+result.tar

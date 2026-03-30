@@ -1,6 +1,9 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
+from common_types import TAMHyperParameters
 from gsl import GSL
 
 
@@ -20,6 +23,7 @@ class GCLayer(nn.Module):
         return h
 
 
+
 class GNN_TAM(nn.Module):
     """
     Model architecture from the paper "Graph Neural Networks with Trainable
@@ -27,40 +31,20 @@ class GNN_TAM(nn.Module):
     https://doi.org/10.1109/ACCESS.2024.3481331
     """
     def __init__(
-            self,
-            n_nodes: int,
-            window_size: int,
-            n_classes: int,
-            n_gnn: int = 1,
-            gsl_type: str = 'relu',
-            n_hidden: int = 1024,
-            alpha: float = 0.1,
-            k: int = None,
-            device: str = 'cpu'
-            ):
-        """
-        Args:
-            n_nodes (int): The number of nodes/sensors.
-            window_size (int): The number of timestamps in one sample.
-            n_classes (int): The number of classes.
-            n_gnn (int): The number of GNN modules.
-            gsl_type (str): The type of GSL block.
-            n_hidden (int): The number of hidden parameters in GCN layers.
-            alpha (float): Saturation rate for GSL block.
-            k (int): The maximum number of edges from one node.
-            device (str): The name of a device to train the model. `cpu` and
-                `cuda` are possible.
-        """
+        self,
+        hyper_params: TAMHyperParameters,
+    ):
         super(GNN_TAM, self).__init__()
-        self.window_size = window_size
-        self.nhidden = n_hidden
-        self.device = device
-        self.idx = torch.arange(n_nodes).to(device)
-        self.adj = [0 for i in range(n_gnn)]
-        self.h = [0 for i in range(n_gnn)]
-        self.skip = [0 for i in range(n_gnn)]
-        self.z = (torch.ones(n_nodes, n_nodes) - torch.eye(n_nodes)).to(device)
-        self.n_gnn = n_gnn
+        self.window_size = hyper_params.window_size
+        self.nhidden = hyper_params.n_hidden
+        total_nodes = hyper_params.n_nodes + hyper_params.k_additional
+        self.k_additional = hyper_params.k_additional
+        self.idx = nn.Buffer(torch.arange(total_nodes), persistent=False)
+        self.adj = [0 for i in range(hyper_params.n_gnn)]
+        self.h = [0 for i in range(hyper_params.n_gnn)]
+        self.skip = [0 for i in range(hyper_params.n_gnn)]
+        self.z = nn.Buffer(torch.ones(total_nodes, total_nodes) - torch.eye(total_nodes), persistent=False)
+        self.n_gnn = hyper_params.n_gnn
 
         self.gsl = nn.ModuleList()
         self.conv1 = nn.ModuleList()
@@ -69,17 +53,18 @@ class GNN_TAM(nn.Module):
         self.bnorm2 = nn.ModuleList()
 
         for i in range(self.n_gnn):
-            self.gsl.append(GSL(gsl_type, n_nodes,
-                                window_size, alpha, k, device))
-            self.conv1.append(GCLayer(window_size, n_hidden))
-            self.bnorm1.append(nn.BatchNorm1d(n_nodes))
-            self.conv2.append(GCLayer(n_hidden, n_hidden))
-            self.bnorm2.append(nn.BatchNorm1d(n_nodes))
+            self.gsl.append(GSL(hyper_params.gsl_type, hyper_params.n_nodes,
+                                hyper_params.window_size, hyper_params.alpha, hyper_params.k, hyper_params.split_by, hyper_params.k_additional))
+            self.conv1.append(GCLayer(hyper_params.window_size, hyper_params.n_hidden))
+            self.bnorm1.append(nn.BatchNorm1d(total_nodes))
+            self.conv2.append(GCLayer(hyper_params.n_hidden, hyper_params.n_hidden))
+            self.bnorm2.append(nn.BatchNorm1d(total_nodes))
 
-        self.fc = nn.Linear(n_gnn*n_hidden, n_classes)
+        self.fc = nn.Linear(hyper_params.n_gnn*hyper_params.n_hidden, hyper_params.n_classes)
 
     def forward(self, X):
-        X = X.to(self.device)
+        if self.k_additional:
+            X = nn.functional.pad(X, (0, 0, 0, self.k_additional), mode='constant', value=0)
         for i in range(self.n_gnn):
             self.adj[i] = self.gsl[i](self.idx)
             self.adj[i] = self.adj[i] * self.z
